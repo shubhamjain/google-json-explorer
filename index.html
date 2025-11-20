@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>JSON Cursor Path Tool (Prism)</title>
+
+  <!-- Prism CSS (JSON included in core) -->
+  <link
+    rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css"
+    integrity="sha512-yvC2lBhA5VaM8ZUCr+tuU7AXpQ5Vui7U7P2ljkzYsLxKdruGbT7J+4iDvFVObl9MyYYMGuAm5cszYjItsHqzDQ=="
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  />
+
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 16px;
+      background: #f5f5f5;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    h1 {
+      font-size: 18px;
+      margin: 0 0 4px;
+    }
+
+    .container {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      height: 80vh;
+    }
+
+    textarea {
+      width: 100%;
+      height: 100%;
+      resize: none;
+      box-sizing: border-box;
+      padding: 8px;
+      font-family: "SF Mono", Menlo, Monaco, Consolas, "Courier New", monospace;
+      font-size: 13px;
+      border-radius: 4px;
+      border: 1px solid #ccc;
+      background: #fff;
+      white-space: pre;
+    }
+
+    pre {
+      margin: 0;
+      border-radius: 4px;
+      border: 1px solid #ccc;
+      height: 100%;
+      box-sizing: border-box;
+      overflow: auto;
+    }
+
+    pre code {
+      font-family: "SF Mono", Menlo, Monaco, Consolas, "Courier New", monospace;
+      font-size: 13px;
+      white-space: pre;
+    }
+
+    .status-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+      color: #333;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .path-label {
+      font-weight: 600;
+    }
+
+    .path {
+      font-family: "SF Mono", Menlo, Monaco, Consolas, "Courier New", monospace;
+      background: #222;
+      color: #0f0;
+      padding: 2px 6px;
+      border-radius: 3px;
+      max-width: 100%;
+      overflow: auto;
+    }
+
+    .error {
+      color: #b00020;
+      font-size: 13px;
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    button {
+      padding: 4px 10px;
+      font-size: 13px;
+      border-radius: 4px;
+      border: 1px solid #999;
+      background: #eee;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #ddd;
+    }
+  </style>
+</head>
+<body>
+  <h1>JSON Cursor Path Tool</h1>
+
+  <div class="status-bar">
+    <div class="controls">
+      <button id="formatBtn" type="button">Format JSON</button>
+      <span id="error" class="error"></span>
+    </div>
+    <div>
+      <span class="path-label">Path at cursor:</span>
+      <span id="path" class="path">$</span>
+    </div>
+  </div>
+
+  <div class="container">
+    <textarea id="jsonInput" spellcheck="false" placeholder='Paste JSON here...'></textarea>
+    <pre><code id="highlighted" class="language-json"></code></pre>
+  </div>
+
+  <!-- Prism JS core + JSON language -->
+  <script
+    src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"
+    integrity="sha512-EJhnuLiB5ejg2oUKf5O83Jtu3QfZetnXUJm1x7rnWbubIgvFUwG0r/x3wahtHlOQkN/Ng+LcnnXcthyqZzY9mg=="
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  ></script>
+  <script
+    src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"
+    integrity="sha512-7DdlkJcggII2GqGTo3nMqMsd1BEHA7fTnjL2fCm6NO8dfnyMXqv9p+AkCea7dDVcVEi7cqhoniQ/QPrT4FGKXQ=="
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  ></script>
+
+  <script>
+    const textarea = document.getElementById('jsonInput');
+    const highlighted = document.getElementById('highlighted');
+    const pathEl = document.getElementById('path');
+    const errorEl = document.getElementById('error');
+    const formatBtn = document.getElementById('formatBtn');
+
+    /**
+     * Best-effort JSON path resolver at a given cursor position.
+     * Same logic as before, just re-used.
+     */
+    function getJsonPathAt(text, pos) {
+      const stack = [{ type: 'root', path: '$', nextIndex: 0 }];
+      let pendingKey = null;
+      let expectingKey = false;
+      let expectingValue = false;
+      let inString = false;
+      let stringIsKey = false;
+      let stringIsValue = false;
+      let escape = false;
+      let stringStart = -1;
+      let currentPath = '$';
+
+      const isWhitespace = (ch) =>
+        ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n';
+
+      for (let i = 0; i < text.length && i < pos; i++) {
+        const ch = text[i];
+
+        if (inString) {
+          if (escape) {
+            escape = false;
+            continue;
+          }
+          if (ch === '\\') {
+            escape = true;
+            continue;
+          }
+          if (ch === '"') {
+            inString = false;
+            const str = text.slice(stringStart + 1, i);
+            if (stringIsKey) {
+              pendingKey = str;
+              expectingKey = false;
+            } else if (stringIsValue) {
+              expectingValue = false;
+            }
+          }
+          continue;
+        }
+
+        if (isWhitespace(ch)) continue;
+
+        const top = stack[stack.length - 1];
+
+        if (ch === '{' || ch === '[') {
+          let path = top.path;
+          if (expectingValue) {
+            if (top.type === 'array') {
+              path = top.path + '[' + top.nextIndex + ']';
+              top.nextIndex++;
+            } else if (top.type === 'object' && pendingKey != null) {
+              path = top.path + '.' + pendingKey;
+              pendingKey = null;
+            }
+          }
+          currentPath = path;
+
+          const frame = {
+            type: ch === '{' ? 'object' : 'array',
+            path,
+            nextIndex: 0,
+          };
+          stack.push(frame);
+          expectingValue = frame.type === 'array';
+          expectingKey = frame.type === 'object';
+          continue;
+        }
+
+        if (ch === '}' || ch === ']') {
+          stack.pop();
+          pendingKey = null;
+          expectingKey = false;
+          expectingValue = false;
+          continue;
+        }
+
+        if (ch === ',') {
+          const parent = stack[stack.length - 1];
+          if (parent.type === 'object') {
+            expectingKey = true;
+            pendingKey = null;
+            expectingValue = false;
+          } else if (parent.type === 'array') {
+            expectingValue = true;
+          }
+          continue;
+        }
+
+        if (ch === ':') {
+          expectingValue = true;
+          continue;
+        }
+
+        if (ch === '"') {
+          stringStart = i;
+          const parent = stack[stack.length - 1];
+          stringIsKey =
+            parent.type === 'object' &&
+            !expectingValue &&
+            (expectingKey || pendingKey == null);
+          stringIsValue = expectingValue && !stringIsKey;
+
+          if (stringIsValue) {
+            let path = parent.path;
+            if (parent.type === 'array') {
+              path = parent.path + '[' + parent.nextIndex + ']';
+              parent.nextIndex++;
+            } else if (parent.type === 'object' && pendingKey != null) {
+              path = parent.path + '.' + pendingKey;
+              pendingKey = null;
+            }
+            currentPath = path;
+          }
+          inString = true;
+          escape = false;
+          continue;
+        }
+
+        // numbers / literals (true/false/null)
+        if (expectingValue) {
+          let parent = stack[stack.length - 1];
+          let path = parent.path;
+          if (parent.type === 'array') {
+            path = parent.path + '[' + parent.nextIndex + ']';
+            parent.nextIndex++;
+          } else if (parent.type === 'object' && pendingKey != null) {
+            path = parent.path + '.' + pendingKey;
+            pendingKey = null;
+          }
+          currentPath = path;
+          expectingValue = false;
+        }
+      }
+
+      return currentPath;
+    }
+
+    function updateHighlight() {
+      const text = textarea.value;
+      let displayText = text;
+      errorEl.textContent = '';
+
+      try {
+        const parsed = JSON.parse(text);
+        displayText = JSON.stringify(parsed, null, 2);
+      } catch (e) {
+        // invalid JSON; show raw and warn
+        errorEl.textContent = 'Invalid JSON (path may be unreliable).';
+      }
+
+      // Use Prism to highlight JSON
+      highlighted.textContent = displayText; // set raw text
+      Prism.highlightElement(highlighted);   // let Prism do its thing
+    }
+
+    function updatePath() {
+      const text = textarea.value;
+      const pos = textarea.selectionStart;
+      const path = getJsonPathAt(text, pos);
+      pathEl.textContent = path;
+    }
+
+    textarea.addEventListener('input', () => {
+      updateHighlight();
+      updatePath();
+    });
+
+    textarea.addEventListener('click', () => {
+      updatePath();
+    });
+
+    textarea.addEventListener('keyup', () => {
+      updatePath();
+    });
+
+    formatBtn.addEventListener('click', () => {
+      const text = textarea.value;
+      try {
+        const parsed = JSON.parse(text);
+        const pretty = JSON.stringify(parsed, null, 2);
+        textarea.value = pretty;
+        errorEl.textContent = '';
+      } catch (e) {
+        errorEl.textContent = 'Cannot format: invalid JSON.';
+      }
+      updateHighlight();
+      updatePath();
+    });
+
+    // Initial render
+    updateHighlight();
+    updatePath();
+  </script>
+</body>
+</html><!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>JSON Cursor Path Tool (Prism)</title>
+
+  <!-- Prism CSS (JSON included in core) -->
+  <link
+    rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css"
+    integrity="sha512-yvC2lBhA5VaM8ZUCr+tuU7AXpQ5Vui7U7P2ljkzYsLxKdruGbT7J+4iDvFVObl9MyYYMGuAm5cszYjItsHqzDQ=="
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  />
+
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 16px;
+      background: #f5f5f5;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    h1 {
+      font-size: 18px;
+      margin: 0 0 4px;
+    }
+
+    .container {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      height: 80vh;
+    }
+
+    textarea {
+      width: 100%;
+      height: 100%;
+      resize: none;
+      box-sizing: border-box;
+      padding: 8px;
+      font-family: "SF Mono", Menlo, Monaco, Consolas, "Courier New", monospace;
+      font-size: 13px;
+      border-radius: 4px;
+      border: 1px solid #ccc;
+      background: #fff;
+      white-space: pre;
+    }
+
+    pre {
+      margin: 0;
+      border-radius: 4px;
+      border: 1px solid #ccc;
+      height: 100%;
+      box-sizing: border-box;
+      overflow: auto;
+    }
+
+    pre code {
+      font-family: "SF Mono", Menlo, Monaco, Consolas, "Courier New", monospace;
+      font-size: 13px;
+      white-space: pre;
+    }
+
+    .status-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+      color: #333;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .path-label {
+      font-weight: 600;
+    }
+
+    .path {
+      font-family: "SF Mono", Menlo, Monaco, Consolas, "Courier New", monospace;
+      background: #222;
+      color: #0f0;
+      padding: 2px 6px;
+      border-radius: 3px;
+      max-width: 100%;
+      overflow: auto;
+    }
+
+    .error {
+      color: #b00020;
+      font-size: 13px;
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    button {
+      padding: 4px 10px;
+      font-size: 13px;
+      border-radius: 4px;
+      border: 1px solid #999;
+      background: #eee;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #ddd;
+    }
+  </style>
+</head>
+<body>
+  <h1>JSON Cursor Path Tool</h1>
+
+  <div class="status-bar">
+    <div class="controls">
+      <button id="formatBtn" type="button">Format JSON</button>
+      <span id="error" class="error"></span>
+    </div>
+    <div>
+      <span class="path-label">Path at cursor:</span>
+      <span id="path" class="path">$</span>
+    </div>
+  </div>
+
+  <div class="container">
+    <textarea id="jsonInput" spellcheck="false" placeholder='Paste JSON here...'></textarea>
+    <pre><code id="highlighted" class="language-json"></code></pre>
+  </div>
+
+  <!-- Prism JS core + JSON language -->
+  <script
+    src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"
+    integrity="sha512-EJhnuLiB5ejg2oUKf5O83Jtu3QfZetnXUJm1x7rnWbubIgvFUwG0r/x3wahtHlOQkN/Ng+LcnnXcthyqZzY9mg=="
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  ></script>
+  <script
+    src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"
+    integrity="sha512-7DdlkJcggII2GqGTo3nMqMsd1BEHA7fTnjL2fCm6NO8dfnyMXqv9p+AkCea7dDVcVEi7cqhoniQ/QPrT4FGKXQ=="
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  ></script>
+
+  <script>
+    const textarea = document.getElementById('jsonInput');
+    const highlighted = document.getElementById('highlighted');
+    const pathEl = document.getElementById('path');
+    const errorEl = document.getElementById('error');
+    const formatBtn = document.getElementById('formatBtn');
+
+    /**
+     * Best-effort JSON path resolver at a given cursor position.
+     * Same logic as before, just re-used.
+     */
+    function getJsonPathAt(text, pos) {
+      const stack = [{ type: 'root', path: '$', nextIndex: 0 }];
+      let pendingKey = null;
+      let expectingKey = false;
+      let expectingValue = false;
+      let inString = false;
+      let stringIsKey = false;
+      let stringIsValue = false;
+      let escape = false;
+      let stringStart = -1;
+      let currentPath = '$';
+
+      const isWhitespace = (ch) =>
+        ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n';
+
+      for (let i = 0; i < text.length && i < pos; i++) {
+        const ch = text[i];
+
+        if (inString) {
+          if (escape) {
+            escape = false;
+            continue;
+          }
+          if (ch === '\\') {
+            escape = true;
+            continue;
+          }
+          if (ch === '"') {
+            inString = false;
+            const str = text.slice(stringStart + 1, i);
+            if (stringIsKey) {
+              pendingKey = str;
+              expectingKey = false;
+            } else if (stringIsValue) {
+              expectingValue = false;
+            }
+          }
+          continue;
+        }
+
+        if (isWhitespace(ch)) continue;
+
+        const top = stack[stack.length - 1];
+
+        if (ch === '{' || ch === '[') {
+          let path = top.path;
+          if (expectingValue) {
+            if (top.type === 'array') {
+              path = top.path + '[' + top.nextIndex + ']';
+              top.nextIndex++;
+            } else if (top.type === 'object' && pendingKey != null) {
+              path = top.path + '.' + pendingKey;
+              pendingKey = null;
+            }
+          }
+          currentPath = path;
+
+          const frame = {
+            type: ch === '{' ? 'object' : 'array',
+            path,
+            nextIndex: 0,
+          };
+          stack.push(frame);
+          expectingValue = frame.type === 'array';
+          expectingKey = frame.type === 'object';
+          continue;
+        }
+
+        if (ch === '}' || ch === ']') {
+          stack.pop();
+          pendingKey = null;
+          expectingKey = false;
+          expectingValue = false;
+          continue;
+        }
+
+        if (ch === ',') {
+          const parent = stack[stack.length - 1];
+          if (parent.type === 'object') {
+            expectingKey = true;
+            pendingKey = null;
+            expectingValue = false;
+          } else if (parent.type === 'array') {
+            expectingValue = true;
+          }
+          continue;
+        }
+
+        if (ch === ':') {
+          expectingValue = true;
+          continue;
+        }
+
+        if (ch === '"') {
+          stringStart = i;
+          const parent = stack[stack.length - 1];
+          stringIsKey =
+            parent.type === 'object' &&
+            !expectingValue &&
+            (expectingKey || pendingKey == null);
+          stringIsValue = expectingValue && !stringIsKey;
+
+          if (stringIsValue) {
+            let path = parent.path;
+            if (parent.type === 'array') {
+              path = parent.path + '[' + parent.nextIndex + ']';
+              parent.nextIndex++;
+            } else if (parent.type === 'object' && pendingKey != null) {
+              path = parent.path + '.' + pendingKey;
+              pendingKey = null;
+            }
+            currentPath = path;
+          }
+          inString = true;
+          escape = false;
+          continue;
+        }
+
+        // numbers / literals (true/false/null)
+        if (expectingValue) {
+          let parent = stack[stack.length - 1];
+          let path = parent.path;
+          if (parent.type === 'array') {
+            path = parent.path + '[' + parent.nextIndex + ']';
+            parent.nextIndex++;
+          } else if (parent.type === 'object' && pendingKey != null) {
+            path = parent.path + '.' + pendingKey;
+            pendingKey = null;
+          }
+          currentPath = path;
+          expectingValue = false;
+        }
+      }
+
+      return currentPath;
+    }
+
+    function updateHighlight() {
+      const text = textarea.value;
+      let displayText = text;
+      errorEl.textContent = '';
+
+      try {
+        const parsed = JSON.parse(text);
+        displayText = JSON.stringify(parsed, null, 2);
+      } catch (e) {
+        // invalid JSON; show raw and warn
+        errorEl.textContent = 'Invalid JSON (path may be unreliable).';
+      }
+
+      // Use Prism to highlight JSON
+      highlighted.textContent = displayText; // set raw text
+      Prism.highlightElement(highlighted);   // let Prism do its thing
+    }
+
+    function updatePath() {
+      const text = textarea.value;
+      const pos = textarea.selectionStart;
+      const path = getJsonPathAt(text, pos);
+      pathEl.textContent = path;
+    }
+
+    textarea.addEventListener('input', () => {
+      updateHighlight();
+      updatePath();
+    });
+
+    textarea.addEventListener('click', () => {
+      updatePath();
+    });
+
+    textarea.addEventListener('keyup', () => {
+      updatePath();
+    });
+
+    formatBtn.addEventListener('click', () => {
+      const text = textarea.value;
+      try {
+        const parsed = JSON.parse(text);
+        const pretty = JSON.stringify(parsed, null, 2);
+        textarea.value = pretty;
+        errorEl.textContent = '';
+      } catch (e) {
+        errorEl.textContent = 'Cannot format: invalid JSON.';
+      }
+      updateHighlight();
+      updatePath();
+    });
+
+    // Initial render
+    updateHighlight();
+    updatePath();
+  </script>
+</body>
+</html>
